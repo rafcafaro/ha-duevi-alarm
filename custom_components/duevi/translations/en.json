@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Duevi CE-LAN Panel",
+        "description": "Enter the IP address and app login details for your Duevi CE-LAN alarm panel. The integration communicates over the local network via UDP.",
+        "data": {
+          "host": "IP Address (e.g. 192.168.1.231)",
+          "email": "App Login Email",
+          "pin": "App Login Password / PIN",
+          "port": "UDP Port (usually 5570)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect. Check IP address, email, and PIN.",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  }
+}

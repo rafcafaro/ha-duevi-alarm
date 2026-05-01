@@ -1,0 +1,7 @@
+{
+  "name": "Duevi CE-LAN Alarm",
+  "render_readme": true,
+  "iot_class": "local_polling",
+  "version": "1.0.0",
+  "domain": "duevi"
+}
