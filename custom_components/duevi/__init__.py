@@ -44,20 +44,29 @@ def _connect_and_discover(client: DueviClient) -> tuple[dict, dict]:
         _LOGGER.error("Cannot connect to Duevi alarm for setup")
         return {}, {}
 
-    # 1. Discover physical devices (query 56 × 8)
+    # 1. Discover physical devices (query 56, max 64)
     devices: dict[int, dict] = {}
-    for i in range(8):
+    dev_empty_streak = 0
+    for i in range(64):
         dev = client.read_device_cfg(i)
         if dev:
+            dev_empty_streak = 0
             devices[i] = dev
             _LOGGER.debug("Device %d: %s (family=%d)", i, dev["name"], dev["family"])
+        else:
+            dev_empty_streak += 1
+            if dev_empty_streak >= 3:
+                break
         time.sleep(0.1)
 
-    # 2. Discover input zones (query 53 × 20)
+    # 2. Discover input zones (query 53, max 128)
+    # Early exit after 5 consecutive empty slots keeps startup fast.
     zones: dict[int, dict] = {}
-    for i in range(20):
+    empty_streak = 0
+    for i in range(128):
         cfg = client.read_input_cfg(i)
         if cfg and cfg["name"].strip():
+            empty_streak = 0
             tech = cfg["technology"]
             if tech in INCLUDED_SENSOR_TECHS:
                 zones[i] = cfg
@@ -65,7 +74,16 @@ def _connect_and_discover(client: DueviClient) -> tuple[dict, dict]:
                 _LOGGER.debug(
                     "Zone %d: %s (tech=%d, device=%s)", i, cfg["name"], tech, dev_name
                 )
+        else:
+            empty_streak += 1
+            if empty_streak >= 5:
+                _LOGGER.debug(
+                    "Stopping zone scan at index %d after %d consecutive empty slots",
+                    i, empty_streak,
+                )
+                break
         time.sleep(0.1)
+
 
     _LOGGER.info(
         "Duevi discovery complete: %d devices, %d sensor zones", len(devices), len(zones)
