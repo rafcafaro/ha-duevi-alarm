@@ -12,6 +12,7 @@ import hashlib
 import logging
 import socket
 import struct
+import threading
 import time
 from typing import Any
 
@@ -81,6 +82,9 @@ class DueviClient:
         self._connected: bool = False
         self._last_status: dict[str, Any] | None = None
         self._last_status_time: float = 0.0
+        # Reentrant lock ensures concurrent HA executor threads (alarm_control_panel
+        # at 5 s and binary_sensor at 1 s) never race on the shared UDP socket.
+        self._lock: threading.RLock = threading.RLock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,40 +92,42 @@ class DueviClient:
 
     def connect(self) -> bool:
         """Establish UDP session: U_CONNECT + AUTH + setup commands."""
-        self.disconnect()
-        try:
-            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._sock.bind(("0.0.0.0", 0))
-
-            if not self._u_connect():
-                return False
-            if not self._auth_session():
-                return False
-            # Mandatory post-login setup commands
-            self._send_query5(0x01)  # read config
-            self._send_query5(0x22)  # switch to operative mode
-            self._connected = True
-            self._last_status_time = 0.0
-            _LOGGER.info("Connected to Duevi alarm at %s:%d", self._host, self._port)
-            return True
-        except Exception:
-            _LOGGER.exception("Failed to connect to Duevi alarm")
+        with self._lock:
             self.disconnect()
-            return False
+            try:
+                self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self._sock.bind(("0.0.0.0", 0))
+
+                if not self._u_connect():
+                    return False
+                if not self._auth_session():
+                    return False
+                # Mandatory post-login setup commands
+                self._send_query5(0x01)  # read config
+                self._send_query5(0x22)  # switch to operative mode
+                self._connected = True
+                self._last_status_time = 0.0
+                _LOGGER.info("Connected to Duevi alarm at %s:%d", self._host, self._port)
+                return True
+            except Exception:
+                _LOGGER.exception("Failed to connect to Duevi alarm")
+                self.disconnect()
+                return False
 
     def disconnect(self) -> None:
         """Close the UDP socket."""
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-        self._sock = None
-        self._nsi_sp = 0
-        self._seq = 2
-        self._hashed_login = ""
-        self._connected = False
-        self._last_status_time = 0.0
+        with self._lock:
+            if self._sock:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+            self._sock = None
+            self._nsi_sp = 0
+            self._seq = 2
+            self._hashed_login = ""
+            self._connected = False
+            self._last_status_time = 0.0
 
     def get_status(self) -> dict[str, Any] | None:
         """Poll alarm status via READ_AREAS_STAT (query 60).
@@ -351,83 +357,99 @@ class DueviClient:
     # ------------------------------------------------------------------
 
     def _send_rpc(self, rpc_body: bytes) -> bytes:
-        """Encode, send NP_DATA, and wait for the crypto response."""
-        if not self._sock:
+        """Encode, send NP_DATA, and wait for the crypto response.
+
+        This method is wrapped with the instance-level RLock so that concurrent
+        HA executor threads (alarm_control_panel + binary_sensor) cannot
+        interleave their packet I/O on the shared UDP socket.
+        """
+        with self._lock:
+            if not self._sock:
+                return b""
+
+            # Drain any stale packets from the socket before sending
+            self._sock.setblocking(False)
+            while True:
+                try:
+                    stale, _ = self._sock.recvfrom(4096)
+                    _LOGGER.debug("drained stale packet: %d bytes", len(stale))
+                except BlockingIOError:
+                    break
+                except Exception:
+                    break
+
+            # Pad to even + always add 2 pad bytes
+            pad = 2 - (len(rpc_body) % 2)
+            if pad == 0:
+                pad = 2
+            padded = rpc_body + bytes([pad] * pad)
+
+            algo = struct.pack(">H", 0x000A)  # CRYPT_W_NULL_DATA
+            pl_len = 4 + len(algo) + len(padded) + 2  # crypto hdr + algo + body + checksum
+            pkt_len = 16 + pl_len
+
+            my_seq = self._seq
+            hdr = struct.pack(
+                ">IIBBBBHH", CP_NSI, self._nsi_sp, 0x16, 0, 0, 0, my_seq, pkt_len
+            )
+            c_hdr = struct.pack(">BBH", 0x36, 0, pl_len)
+
+            chk = sum(hdr + c_hdr + algo + padded) & 0xFFFF
+            pkt = hdr + c_hdr + algo + padded + struct.pack(">H", chk)
+
+            self._seq += 1
+            self._sock.sendto(pkt, (self._host, self._port))
+
+            # Wait for the crypto response (skip ACK packets)
+            end = time.time() + 5.0
+            self._sock.settimeout(1.0)
+            while time.time() < end:
+                try:
+                    data, _ = self._sock.recvfrom(4096)
+                    if len(data) < 16:
+                        continue
+
+                    pkt_type = data[8]
+                    resp_seq = struct.unpack(">H", data[12:14])[0]
+                    _LOGGER.debug("recv %d bytes type=0x%02x seq=%d (expect=%d)",
+                                  len(data), pkt_type, resp_seq, my_seq)
+
+                    if pkt_type != 0x16:
+                        continue  # skip ACKs and other non-data packets
+
+                    # Sequence-number guard: only accept the response that
+                    # corresponds to the query we just sent.  Mismatched
+                    # sequence numbers indicate stale or cross-thread packets.
+                    if resp_seq != my_seq:
+                        _LOGGER.debug(
+                            "Discarding out-of-order packet: seq=%d, expected=%d",
+                            resp_seq, my_seq,
+                        )
+                        continue
+
+                    # Parse NP_DATA payload
+                    pos = 16
+                    while pos + 4 <= len(data):
+                        pt = data[pos]
+                        pl = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+                        if pt == 0x36 and pl > 4:
+                            enc = data[pos + 4 : pos + pl]
+                            if len(enc) >= 4:
+                                # strip algo(2) and checksum(2), then remove padding
+                                raw = enc[2:-2]
+                                if len(raw) > 0:
+                                    pc = raw[-1]
+                                    if 0 < pc <= 2 and pc <= len(raw):
+                                        return raw[:-pc]
+                                    return raw
+                        pos += pl
+                except socket.timeout:
+                    pass
+                except Exception:
+                    _LOGGER.exception("Error receiving RPC response")
+                    break
+
             return b""
-
-        # Drain any stale packets from the socket before sending
-        self._sock.setblocking(False)
-        while True:
-            try:
-                stale, _ = self._sock.recvfrom(4096)
-                _LOGGER.debug("drained stale packet: %d bytes", len(stale))
-            except BlockingIOError:
-                break
-            except Exception:
-                break
-
-        # Pad to even + always add 2 pad bytes
-        pad = 2 - (len(rpc_body) % 2)
-        if pad == 0:
-            pad = 2
-        padded = rpc_body + bytes([pad] * pad)
-
-        algo = struct.pack(">H", 0x000A)  # CRYPT_W_NULL_DATA
-        pl_len = 4 + len(algo) + len(padded) + 2  # crypto hdr + algo + body + checksum
-        pkt_len = 16 + pl_len
-
-        my_seq = self._seq
-        hdr = struct.pack(
-            ">IIBBBBHH", CP_NSI, self._nsi_sp, 0x16, 0, 0, 0, my_seq, pkt_len
-        )
-        c_hdr = struct.pack(">BBH", 0x36, 0, pl_len)
-
-        chk = sum(hdr + c_hdr + algo + padded) & 0xFFFF
-        pkt = hdr + c_hdr + algo + padded + struct.pack(">H", chk)
-
-        self._seq += 1
-        self._sock.sendto(pkt, (self._host, self._port))
-
-        # Wait for the crypto response (skip ACK packets)
-        end = time.time() + 5.0
-        self._sock.settimeout(1.0)
-        while time.time() < end:
-            try:
-                data, _ = self._sock.recvfrom(4096)
-                if len(data) < 16:
-                    continue
-
-                pkt_type = data[8]
-                resp_seq = struct.unpack(">H", data[12:14])[0]
-                _LOGGER.debug("recv %d bytes type=0x%02x seq=%d (expect=%d)",
-                              len(data), pkt_type, resp_seq, my_seq)
-
-                if pkt_type != 0x16:
-                    continue  # skip ACKs and other non-data packets
-
-                # Parse NP_DATA payload
-                pos = 16
-                while pos + 4 <= len(data):
-                    pt = data[pos]
-                    pl = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
-                    if pt == 0x36 and pl > 4:
-                        enc = data[pos + 4 : pos + pl]
-                        if len(enc) >= 4:
-                            # strip algo(2) and checksum(2), then remove padding
-                            raw = enc[2:-2]
-                            if len(raw) > 0:
-                                pc = raw[-1]
-                                if 0 < pc <= 2 and pc <= len(raw):
-                                    return raw[:-pc]
-                                return raw
-                    pos += pl
-            except socket.timeout:
-                pass
-            except Exception:
-                _LOGGER.exception("Error receiving RPC response")
-                break
-
-        return b""
 
     # ------------------------------------------------------------------
     # Sensor queries (used by binary_sensor.py)
