@@ -255,7 +255,7 @@ class DueviClient:
             _LOGGER.error("Set area state failed: answer=%d", answer)
         return False
 
-    def _send_query5(self, cmd: int, data: int = 0) -> bytes:
+    def _send_query5(self, cmd: int, data: int = 0) -> bytes | None:
         """Build and send a SETTING_UPDATE (query 5) command."""
         body = (
             struct.pack(">I", 5)
@@ -363,7 +363,7 @@ class DueviClient:
     # Private: packet I/O
     # ------------------------------------------------------------------
 
-    def _send_rpc(self, rpc_body: bytes) -> bytes:
+    def _send_rpc(self, rpc_body: bytes) -> bytes | None:
         """Encode, send NP_DATA, and wait for the crypto response.
 
         This method is wrapped with the instance-level RLock so that concurrent
@@ -372,7 +372,7 @@ class DueviClient:
         """
         with self._lock:
             if not self._sock:
-                return b""
+                return None
 
             # Drain any stale packets from the socket before sending
             self._sock.setblocking(False)
@@ -404,7 +404,7 @@ class DueviClient:
             chk = sum(hdr + c_hdr + algo + padded) & 0xFFFF
             pkt = hdr + c_hdr + algo + padded + struct.pack(">H", chk)
 
-            self._seq += 1
+            self._seq = (self._seq + 1) & 0xFFFF
             self._sock.sendto(pkt, (self._host, self._port))
 
             # Wait for the crypto response (skip ACK packets)
@@ -412,7 +412,7 @@ class DueviClient:
             self._sock.settimeout(1.0)
             while time.time() < end:
                 try:
-                    data, _ = self._sock.recvfrom(4096)
+                    data, _ = self._sock.recvfrom(65535)
                     if len(data) < 16:
                         continue
 
@@ -434,11 +434,19 @@ class DueviClient:
                         )
                         continue
 
+                    # Nabto's exception flag is not a successful RPC response,
+                    # including for commands such as capture with an empty body.
+                    if data[11] & 0x02:
+                        _LOGGER.warning("Panel rejected RPC request")
+                        return None
+
                     # Parse NP_DATA payload
                     pos = 16
                     while pos + 4 <= len(data):
                         pt = data[pos]
                         pl = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+                        if pl < 4 or pos + pl > len(data):
+                            break
                         if pt == 0x36 and pl > 4:
                             enc = data[pos + 4 : pos + pl]
                             if len(enc) >= 4:
@@ -456,13 +464,13 @@ class DueviClient:
                     _LOGGER.exception("Error receiving RPC response")
                     break
 
-            return b""
+            return None
 
     # ------------------------------------------------------------------
     # Sensor queries (used by binary_sensor.py)
     # ------------------------------------------------------------------
 
-    def _send_sensor_query(self, query_id: int, index: int = 0) -> bytes:
+    def _send_sensor_query(self, query_id: int, index: int = 0) -> bytes | None:
         """Send a generic sensor query with hashed_login + index byte."""
         body = (
             struct.pack(">I", query_id)

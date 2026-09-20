@@ -29,6 +29,8 @@ from .const import (
 )
 from .nabto_udp import DueviClient
 from .device_status import DueviDeviceCoordinator, remove_legacy_low_battery_entities
+from .video import VIDEO_PIR_FAMILY
+from .video_coordinator import DueviVideoCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +38,9 @@ PLATFORMS: list[Platform] = [
     Platform.ALARM_CONTROL_PANEL,
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
+    Platform.IMAGE,
+    Platform.BUTTON,
+    Platform.CAMERA,
 ]
 
 
@@ -125,7 +130,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     remove_legacy_low_battery_entities(er.async_get(hass), entry.entry_id)
+    video_devices = {i: cfg for i, cfg in devices.items()
+                     if cfg.get("family") == VIDEO_PIR_FAMILY}
+    if video_devices:
+        coordinator = DueviVideoCoordinator(hass, entry, client, video_devices)
+        hass.data[DOMAIN][entry.entry_id]["video_coordinator"] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if video_devices:
+        # Slow radio downloads must not delay alarm platform setup. HA cancels
+        # this config-entry background task when the entry is unloaded.
+        entry.async_create_background_task(
+            hass, coordinator.async_refresh(), "Duevi initial image refresh"
+        )
 
     return True
 
@@ -134,6 +150,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         entry_data = hass.data[DOMAIN].pop(entry.entry_id)
+        if coordinator := entry_data.get("video_coordinator"):
+            await coordinator.async_shutdown()
         client: DueviClient = entry_data["client"]
         await hass.async_add_executor_job(client.disconnect)
 
