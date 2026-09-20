@@ -5,3 +5,22 @@ __pycache__/
 *.log
 .DS_Store
 Thumbs.db
+.test-deps/
+.deployment-baseline/
+# Local administration helper specific to this HA installation.
+/scripts/deploy_live.py
+
+# Local agent instructions and installation-specific validation notes.
+/AGENTS.md
+/docs/battery_validation.md
+
+# Local credentials and environment files.
+.env
+.env.*
+!.env.example
+secrets.yaml
+*.key
+*.pem
+*.p12
+*.pfx
+*-ssh.xml

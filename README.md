@@ -11,6 +11,13 @@ A custom [Home Assistant](https://www.home-assistant.io/) integration for **Duev
 - **Binary Sensors** — Real-time status for PIR motion sensors, magnetic door/window contacts, and vibration sensors (1-second polling)
 - **100% Local** — Direct UDP communication with the panel via the Nabto Micro protocol
 - **Zero Dependencies** — Pure Python, no external libraries required
+- **Device diagnostics** — Battery percentage, tamper, missing device, temperature and radio quality. Device status is fetched once every 30 seconds, shared across both entity platforms.
+
+Battery values are the last reports stored by the panel, not direct measurements of sleeping radio devices. Batteries are created only for peripherals advertising battery capability. A zero radio battery with no packet reception recorded is treated conservatively as unknown; a received zero remains 0%. Battery level is exposed only as a percentage; use a numeric-state automation for your preferred low-battery threshold. Failed diagnostic polls make diagnostic entities unavailable until communication recovers. The existing fast zone polling is preserved.
+
+Updating from the trial version 1.0.2 removes its redundant Low Battery entities from the entity registry when the integration loads. Percentage sensors keep their existing IDs.
+
+Offline regression tests: `python -m unittest discover -s tests -v`.
 
 ## Installation
 

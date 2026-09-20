@@ -1,7 +1,7 @@
 {
   "domain": "duevi",
   "name": "Duevi CE-LAN Alarm",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "documentation": "https://github.com/rafcafaro/ha-duevi-alarm",
   "requirements": [],
   "dependencies": [],

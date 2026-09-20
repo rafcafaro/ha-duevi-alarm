@@ -37,6 +37,7 @@ from .const import (
     SENSOR_TECH_REED,
 )
 from .nabto_udp import DueviClient
+from homeassistant.const import EntityCategory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,20 +79,28 @@ async def async_setup_entry(
 
     if not zones:
         _LOGGER.warning("No matching sensor zones found on Duevi alarm")
-        return
 
     _LOGGER.info("Setting up %d Duevi binary sensor entities", len(zones))
 
     # Create the shared coordinator that manages polling
     coordinator = DueviSensorCoordinator(client, entry.data["host"])
 
-    # Create binary sensor entities
-    entities = []
+    # Create binary sensor entities for input zones
+    entities: list[BinarySensorEntity] = []
     for idx, zone_cfg in zones.items():
         dev_info = devices.get(zone_cfg["hw_dev_index"])
         entities.append(DueviBinarySensor(coordinator, idx, zone_cfg, dev_info))
 
+    # Create device health binary sensors (Tamper and Problem/Missing).
+    if devices:
+        dev_coordinator = entry_data["device_coordinator"]
+        for dev_idx, dev_cfg in devices.items():
+            dev_name = dev_cfg.get("name", "").strip() or f"Device {dev_idx}"
+            entities.append(DueviDeviceTamperSensor(dev_coordinator, dev_idx, dev_cfg))
+            entities.append(DueviDeviceProblemSensor(dev_coordinator, dev_idx, dev_cfg))
+
     async_add_entities(entities, True)
+
 
 
 
@@ -167,7 +176,7 @@ class DueviSensorCoordinator:
             self._consecutive_failures += 1
             _LOGGER.exception(
                 "Error polling Duevi sensor stats (failure %d/%d)",
-                self._consecutive_failures, _FAILURE_THRESHOLD,
+                self._consecutive_failures, FAILURE_THRESHOLD,
             )
             self._client.disconnect()
             return self._last_stats
@@ -253,3 +262,102 @@ class DueviBinarySensor(BinarySensorEntity):
             return
         if self._zone_index < len(stats):
             self._line_state = stats[self._zone_index][KEY_LINE_STATE]
+
+
+class DueviBaseDeviceBinarySensor(BinarySensorEntity):
+    """Base class for Duevi physical device binary sensors."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: Any,
+        device_index: int,
+        device_cfg: dict[str, Any],
+    ) -> None:
+        self._coordinator = coordinator
+        self._device_index = device_index
+        self._device_cfg = device_cfg
+
+        dev_name = device_cfg.get("name", "").strip() or f"Device {device_index}"
+        family = device_cfg.get("family", -1)
+        family_name = DEVICE_FAMILY_NAMES.get(family, f"Family {family}")
+
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"duevi_device_{device_index}")},
+            "name": dev_name,
+            "manufacturer": "Duevi",
+            "model": family_name,
+        }
+
+    @property
+    def available(self) -> bool:
+        """Sensor is available as long as coordinator is healthy."""
+        return self._coordinator.is_available and self._get_my_stat() is not None
+
+    def _get_my_stat(self) -> dict[str, Any] | None:
+        """Helper to find this device's stat entry from coordinator array."""
+        return self._coordinator.get_cached_status(self._device_index)
+
+
+class DueviDeviceTamperSensor(DueviBaseDeviceBinarySensor):
+    """Tamper sensor for a Duevi physical device."""
+
+    _attr_device_class = BinarySensorDeviceClass.TAMPER
+
+    def __init__(
+        self,
+        coordinator: Any,
+        device_index: int,
+        device_cfg: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator, device_index, device_cfg)
+        dev_name = device_cfg.get("name", "").strip() or f"Device {device_index}"
+        self._attr_name = "Tamper"
+        self._attr_unique_id = f"duevi_dev_{device_index}_tamper"
+        self._is_on: bool | None = None
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if device enclosure is tampered."""
+        return self._is_on
+
+    def update(self) -> None:
+        """Update tamper state from device stats."""
+        self._coordinator.get_device_stats()
+        stat = self._get_my_stat()
+        if stat is not None:
+            from .const import KEY_DEV_TAMPER
+            self._is_on = bool(stat.get(KEY_DEV_TAMPER, 0))
+
+
+class DueviDeviceProblemSensor(DueviBaseDeviceBinarySensor):
+    """Problem (missing/offline) sensor for a Duevi physical device."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(
+        self,
+        coordinator: Any,
+        device_index: int,
+        device_cfg: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator, device_index, device_cfg)
+        dev_name = device_cfg.get("name", "").strip() or f"Device {device_index}"
+        self._attr_name = "Problem"
+        self._attr_unique_id = f"duevi_dev_{device_index}_problem"
+        self._is_on: bool | None = None
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if device is missing/offline."""
+        return self._is_on
+
+    def update(self) -> None:
+        """Update missing/problem state from device stats."""
+        self._coordinator.get_device_stats()
+        stat = self._get_my_stat()
+        if stat is not None:
+            from .const import KEY_DEV_MISSING
+            self._is_on = bool(stat.get(KEY_DEV_MISSING, 0))

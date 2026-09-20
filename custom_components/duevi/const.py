@@ -32,11 +32,24 @@ LINE_STATE_SHORT = 1
 LINE_STATE_ALARM = 2
 LINE_STATE_TAMPER = 3
 
+# --- Device status keys (returned by read_devices_stat, query 57) ---
+KEY_DEV_TAMPER = "tamper"
+KEY_DEV_ANTI_MKS = "anti_mks"
+KEY_DEV_MISSING = "miss_dev"
+KEY_DEV_NET_QUALITY = "net_quality"
+KEY_DEV_BATTERY_PCT = "battery_pct"
+KEY_DEV_POWER_SUPPLY = "power_supply"
+KEY_DEV_TEMPERATURE = "temperature"
+
 # --- Device family names (protocol query 56) ---
 DEVICE_FAMILY_NAMES = {
-    0: "", 1: "DVT", 3: "ESP8-BUS", 16: "CELAN",
-    64: "TX6C", 65: "MINI-C", 70: "VIPER", 71: "TX6C-AES",
-    75: "MINI-C-RDC", 128: "VIDEO-PIR",
+    0: "", 1: "DVT", 2: "LET-485", 3: "ESP8-BUS", 4: "VV-ZELA-BUS",
+    5: "ESP-R", 6: "ESP-R-868", 16: "CELAN", 17: "CELAN-SMART",
+    64: "TX6C", 65: "MINI-C", 66: "MINI-M", 67: "VV-ZELA-RB",
+    68: "FLOOD-RADIO", 69: "DIRRV2", 70: "VIPER", 71: "TX6C-AES",
+    72: "EWALL", 73: "VIPER-DT", 74: "MOSKITO+", 75: "MINI-C-RDC",
+    76: "KAPTURE", 78: "DOM-AC", 79: "DOM-DC", 80: "SIRPZ-RB",
+    82: "MONOLITH", 83: "MONOLITH-DT", 128: "VIDEO-PIR",
 }
 
 # --- Panel state machine values (protocol query 60) ---

@@ -20,6 +20,7 @@ import time
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_HOST, CONF_PORT, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_PIN,
@@ -27,10 +28,15 @@ from .const import (
     INCLUDED_SENSOR_TECHS,
 )
 from .nabto_udp import DueviClient
+from .device_status import DueviDeviceCoordinator, remove_legacy_low_battery_entities
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.ALARM_CONTROL_PANEL, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.ALARM_CONTROL_PANEL,
+    Platform.BINARY_SENSOR,
+    Platform.SENSOR,
+]
 
 
 
@@ -47,7 +53,9 @@ def _connect_and_discover(client: DueviClient) -> tuple[dict, dict]:
     # 1. Discover physical devices (query 56, max 64)
     devices: dict[int, dict] = {}
     dev_empty_streak = 0
-    for i in range(64):
+    device_stats = client.read_devices_stat()
+    device_count = min(len(device_stats), 256) if device_stats else 64
+    for i in range(device_count):
         dev = client.read_device_cfg(i)
         if dev:
             dev_empty_streak = 0
@@ -55,7 +63,7 @@ def _connect_and_discover(client: DueviClient) -> tuple[dict, dict]:
             _LOGGER.debug("Device %d: %s (family=%d)", i, dev["name"], dev["family"])
         else:
             dev_empty_streak += 1
-            if dev_empty_streak >= 3:
+            if not device_stats and dev_empty_streak >= 3:
                 break
         time.sleep(0.1)
 
@@ -113,8 +121,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "client": client,
         "devices": devices,
         "zones": zones,
+        "device_coordinator": DueviDeviceCoordinator(client, host),
     }
 
+    remove_legacy_low_battery_entities(er.async_get(hass), entry.entry_id)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True

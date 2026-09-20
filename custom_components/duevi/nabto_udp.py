@@ -18,6 +18,13 @@ from typing import Any
 
 from .const import (
     DEFAULT_PORT,
+    KEY_DEV_ANTI_MKS,
+    KEY_DEV_BATTERY_PCT,
+    KEY_DEV_MISSING,
+    KEY_DEV_NET_QUALITY,
+    KEY_DEV_POWER_SUPPLY,
+    KEY_DEV_TAMPER,
+    KEY_DEV_TEMPERATURE,
     KEY_LINE_STATE,
     KEY_TX_FLAGS,
     KEY_TX_STATE,
@@ -542,7 +549,7 @@ class DueviClient:
         """Read config for a single physical device (query 56).
 
         Returns dict with: name, family, nbr_inputs, nbr_outputs, fw_version
-        Returns None if slot is empty (transport=7) or on error.
+        Returns None if slot is empty (transport=0) or on error.
         """
         resp = self._send_sensor_query(56, index)
         if not resp or len(resp) < 4:
@@ -566,14 +573,66 @@ class DueviClient:
         nbr_outputs = resp[pos]; pos += 1
         fw_version = struct.unpack(">H", resp[pos:pos+2])[0]; pos += 2
 
-        # transport=7 means empty/unconfigured slot
-        if transport == 7:
+        # App devices.js: FREE=0, MAINBRD=1, RADIO=2, LAN=7.
+        if transport == 0:
             return None
 
         return {
             "name": name,
+            "transport": transport,
+            "type": dev_type,
+            "serial_log": serial_log,
             "family": family,
             "nbr_inputs": nbr_inputs,
             "nbr_outputs": nbr_outputs,
             "fw_version": fw_version,
         }
+
+    def read_devices_stat(self) -> list[dict[str, Any]] | None:
+        """Read live health and battery status for ALL physical devices (query 57).
+
+        Returns list of dicts with:
+          - battery_pct: uint8 (0-100%)
+          - power_supply: bool (True for AC/mains, False for battery)
+          - tamper: uint8 (tamper flags)
+          - anti_mks: uint8 (anti-masking flags)
+          - miss_dev: uint8 (1 if device missing/offline)
+          - net_quality: uint8 (signal quality)
+          - temperature: float | None (ambient temp °C if supported, else None)
+        Returns None on communication failure.
+        """
+        with self._lock:
+            resp = self._send_sensor_query(57, 0)
+            if not resp or len(resp) < 2:
+                return None
+
+            pos = 0
+            count = struct.unpack(">H", resp[pos:pos+2])[0]; pos += 2
+            if count == 0 or len(resp) != 2 + count * 12:
+                return None
+
+            stats = []
+            for _ in range(count):
+                tamper = resp[pos]; pos += 1
+                anti_mks = resp[pos]; pos += 1
+                miss_dev = resp[pos]; pos += 1
+                net_quality = resp[pos]; pos += 1
+                tx_rpt = resp[pos]; pos += 1
+                tx_pwr = resp[pos]; pos += 1
+                battery = resp[pos]; pos += 1
+                pkt_recv = struct.unpack(">I", resp[pos:pos+4])[0]; pos += 4
+                temp_raw = struct.unpack(">b", resp[pos:pos+1])[0]; pos += 1
+                temp = None if temp_raw == 126 else (temp_raw / 2.0 + 25.0)
+
+                stats.append({
+                    KEY_DEV_TAMPER: tamper,
+                    KEY_DEV_ANTI_MKS: anti_mks,
+                    KEY_DEV_MISSING: miss_dev,
+                    KEY_DEV_NET_QUALITY: net_quality,
+                    KEY_DEV_BATTERY_PCT: (battery & 0x7F) if (battery & 0x7F) <= 100 else None,
+                    "battery_raw": battery,
+                    "packet_received_time": pkt_recv,
+                    KEY_DEV_POWER_SUPPLY: bool(battery & 0x80),
+                    KEY_DEV_TEMPERATURE: temp,
+                })
+            return stats
